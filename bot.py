@@ -1,5 +1,6 @@
 import os
 import io
+import tempfile
 import logging
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -37,7 +38,7 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# 3. Optional Cloud Health Server (Allows free deployment on Render / Koyeb)
+# 3. Cloud Health Server (Keeps Render / Koyeb alive without OOM)
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -45,7 +46,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"AI Telegram Bot is active!")
 
     def log_message(self, format, *args):
-        pass  # Silence web server access logs
+        pass
 
 def start_cloud_health_server():
     port = int(os.getenv("PORT", 0))
@@ -68,7 +69,7 @@ CLEAN_SYSTEM_INSTRUCTION = (
 
 APP_CONFIG = types.GenerateContentConfig(
     system_instruction=CLEAN_SYSTEM_INSTRUCTION,
-    max_output_tokens=400,
+    max_output_tokens=500,
     temperature=0.5,
 )
 
@@ -204,11 +205,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
+    temp_path = None
     try:
         file = await context.bot.get_file(photo.file_id)
-        image_stream = io.BytesIO()
-        await file.download_to_memory(out=image_stream)
-        image_bytes = image_stream.getvalue()
+        # Download directly to a temp file to keep memory footprint minimal
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tf:
+            temp_path = tf.name
+        await file.download_to_drive(custom_path=temp_path)
+
+        with open(temp_path, "rb") as f:
+            image_bytes = f.read()
 
         image_part = types.Part.from_bytes(
             data=image_bytes,
@@ -220,6 +226,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"❌ [Error with photo]: {e}")
         await update.message.reply_text(f"Error reviewing image: {e}", parse_mode=None)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -228,32 +237,58 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = update.effective_chat.id
     doc = update.message.document
-    mime_type = doc.mime_type or "application/pdf"
     caption = update.message.caption or "Summarize this document briefly in plain text without formatting symbols."
     user_name = update.effective_user.first_name if update.effective_user else "User"
 
-    if doc.file_size and doc.file_size > 20 * 1024 * 1024:
-        await update.message.reply_text("The file is larger than 20MB (Telegram limit).", parse_mode=None)
+    # Enforce safe size limit to prevent memory crashes on free cloud hosting
+    if doc.file_size and doc.file_size > 15 * 1024 * 1024:
+        await update.message.reply_text("This file is larger than 15MB. Please send a smaller PDF.", parse_mode=None)
         return
 
+    # Notify user that processing has begun
+    status_msg = await update.message.reply_text("Reading and analyzing your document... Please give me a moment.", parse_mode=None)
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
+    temp_path = None
+    uploaded_file = None
     try:
         file = await context.bot.get_file(doc.file_id)
-        doc_stream = io.BytesIO()
-        await file.download_to_memory(out=doc_stream)
-        doc_bytes = doc_stream.getvalue()
 
-        doc_part = types.Part.from_bytes(
-            data=doc_bytes,
-            mime_type=mime_type,
-        )
-        reply_content = await generate_gemini_response([doc_part, caption])
+        # Save to disk stream to preserve RAM on Render (prevents 512MB OOM crash)
+        file_ext = os.path.splitext(doc.file_name or "")[1] or ".pdf"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tf:
+            temp_path = tf.name
+
+        await file.download_to_drive(custom_path=temp_path)
+
+        # Upload using Gemini's native Files API for robust server-side processing
+        uploaded_file = await ai_client.aio.files.upload(file=temp_path)
+
+        reply_content = await generate_gemini_response([uploaded_file, caption])
         await send_clean_message(update, reply_content)
         print(f"📤 [Replied to document from {user_name}]")
     except Exception as e:
         print(f"❌ [Error with document]: {e}")
         await update.message.reply_text(f"Error reviewing document: {e}", parse_mode=None)
+    finally:
+        # Clean up temporary file from disk
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+        # Clean up file from Google Cloud temporary storage
+        if uploaded_file and hasattr(uploaded_file, "name"):
+            try:
+                await ai_client.aio.files.delete(name=uploaded_file.name)
+            except Exception:
+                pass
+        # Remove the status message
+        if status_msg:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
 
 
 async def post_init(application):
@@ -269,7 +304,6 @@ async def post_init(application):
 
 
 def main():
-    # Start optional cloud health server if hosted on Render / Koyeb
     start_cloud_health_server()
 
     print("Connecting to Telegram...")
