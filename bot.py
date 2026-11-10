@@ -43,7 +43,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"High-IQ AI Telegram Bot is active!")
+        self.wfile.write(b"High-IQ AI Telegram Bot with Memory is active!")
 
     def log_message(self, format, *args):
         pass
@@ -58,15 +58,15 @@ def start_cloud_health_server():
 # 4. Initialize Gemini AI Client
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# High-IQ, comprehensive, clean plain-text instruction
+# High-IQ instruction with contextual memory awareness
 HIGH_IQ_SYSTEM_INSTRUCTION = (
     "You are an exceptionally intelligent, articulate, and deeply knowledgeable AI mind.\n"
     "Your objective is to provide comprehensive, thorough, and crystal-clear explanations with high intellectual depth.\n\n"
     "CORE PRINCIPLES:\n"
-    "1. THOROUGH & WELL-DEFINED: Never give short or dismissive answers. Fully define the subject, break down how it works, "
+    "1. CONTEXT & FOLLOW-UPS: You have memory of this ongoing conversation. When the user asks follow-up questions "
+    "(such as 'why?', 'tell me more', 'how does this connect?', 'give an example of that'), seamlessly use the previous context to deliver deep, relevant answers.\n"
+    "2. THOROUGH & WELL-DEFINED: Never give short or dismissive answers. Fully define the subject, break down how it works, "
     "explain background context, nuances, and real-world applications. Ensure the user walks away with complete mastery of the topic.\n"
-    "2. NO MEMORY / NO FOLLOW-UPS: Treat every prompt as an independent, standalone request. Never assume or refer to old conversations. "
-    "Crucially: NEVER add conversational follow-up questions at the end (e.g., do NOT write 'Do you want more details?', 'Let me know if you need help', etc.). End cleanly once the explanation is complete.\n"
     "3. CLEAN PLAIN TEXT (ZERO SYMBOLS): Telegram does not render markdown well. Never use symbols like #, ##, *, **, $, _, ~, `, or {}.\n"
     "To organize your response cleanly, use neat line breaks and readable plain capital labels (such as OVERVIEW, CORE DEFINITION, HOW IT WORKS, KEY TAKEAWAYS), or standard numbers (1, 2, 3).\n"
     "4. SCIENCE, FORMULAS & REACTIONS: When explaining reactions or formulas, write them out clearly in words first, followed by clean standard keyboard text without confusing code symbols.\n"
@@ -75,11 +75,10 @@ HIGH_IQ_SYSTEM_INSTRUCTION = (
 
 APP_CONFIG = types.GenerateContentConfig(
     system_instruction=HIGH_IQ_SYSTEM_INSTRUCTION,
-    max_output_tokens=2048,  # Generous headroom for deep, thorough answers
+    max_output_tokens=2048,
     temperature=0.6,
 )
 
-# Priority list of models (prioritizes 3.8-flash for peak reasoning and high IQ)
 MODELS_TO_TRY = [
     "gemini-3.8-flash",
     "gemini-3.5-flash-lite",
@@ -87,20 +86,52 @@ MODELS_TO_TRY = [
     "gemini-2.5-flash-lite",
 ]
 
+# 5. Per-User Conversation Memory (Keeps last 10 messages for follow-ups)
+# Format: { chat_id: [ types.Content(role="user"|"model", parts=[...]) ] }
+chat_histories: dict[int, list[types.Content]] = {}
+MAX_HISTORY_MESSAGES = 10
 
-async def generate_gemini_response(contents):
-    """Generate content asynchronously with automatic fallback and high intellectual depth."""
+
+def add_to_history(chat_id: int, role: str, parts: list):
+    """Store message turn in memory while keeping memory compact."""
+    if chat_id not in chat_histories:
+        chat_histories[chat_id] = []
+
+    content = types.Content(role=role, parts=parts)
+    chat_histories[chat_id].append(content)
+
+    # Keep only the last MAX_HISTORY_MESSAGES turns
+    if len(chat_histories[chat_id]) > MAX_HISTORY_MESSAGES:
+        chat_histories[chat_id] = chat_histories[chat_id][-MAX_HISTORY_MESSAGES:]
+
+
+def get_history(chat_id: int) -> list[types.Content]:
+    """Retrieve existing conversation turns for this chat."""
+    return chat_histories.get(chat_id, [])
+
+
+async def generate_gemini_response(chat_id: int, current_parts: list) -> str:
+    """Generate content using conversation history for smart follow-ups."""
+    # Build complete conversation sequence including this turn
+    history = list(get_history(chat_id))
+    current_content = types.Content(role="user", parts=current_parts)
+    full_contents = history + [current_content]
+
     last_error = None
     for model_name in MODELS_TO_TRY:
         try:
-            print(f"🧠 High-IQ reasoning with {model_name}...")
+            print(f"🧠 High-IQ reasoning with {model_name} (turn #{len(full_contents)})...")
             response = await ai_client.aio.models.generate_content(
                 model=model_name,
-                contents=contents,
+                contents=full_contents,
                 config=APP_CONFIG,
             )
             if response and response.text:
-                return response.text
+                reply_text = response.text
+                # Commit both the user prompt and the model response to memory
+                add_to_history(chat_id, "user", current_parts)
+                add_to_history(chat_id, "model", [types.Part.from_text(text=reply_text)])
+                return reply_text
         except Exception as e:
             print(f"⚠️ {model_name} issue: {e}. Trying fallback...")
             last_error = e
@@ -118,7 +149,6 @@ async def send_clean_message(update: Update, text: str):
         await update.message.reply_text(text, parse_mode=None)
         return
 
-    # Clean chunking for long, in-depth explanations
     chunks = []
     current_chunk = ""
     for paragraph in text.split("\n"):
@@ -155,28 +185,43 @@ async def log_incoming_update(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # --- Command Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    chat_histories.pop(chat_id, None)  # Reset memory on fresh start
     user_name = update.effective_user.first_name if update.effective_user else "there"
     welcome_text = (
-        f"Hello {user_name}. I am your advanced AI assistant.\n\n"
+        f"Hello {user_name}. I am your advanced AI assistant with conversational memory.\n\n"
         "Capabilities:\n"
-        "- Comprehensive, deeply articulated answers across all domains\n"
-        "- Advanced scientific, mathematical, and conceptual explanations\n"
+        "- In-depth, comprehensive explanations with contextual follow-ups\n"
+        "- Deep scientific, mathematical, and analytical reasoning\n"
         "- High-detail photo and diagram analysis\n"
         "- Exhaustive PDF and document reviews\n\n"
+        "Commands:\n"
+        "/new - Clear memory & start a fresh topic\n"
+        "/help - Instructions\n\n"
         "Send any inquiry, image, or document to begin."
     )
     await update.message.reply_text(welcome_text, parse_mode=None)
     print(f"📤 [Sent Welcome to {user_name}]")
 
 
+async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Clear conversation history so the user can switch topics completely."""
+    chat_id = update.effective_chat.id
+    chat_histories.pop(chat_id, None)
+    await update.message.reply_text("Conversation memory cleared. Ready for a new topic.", parse_mode=None)
+    print(f"🧹 [Cleared memory for chat {chat_id}]")
+
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "Usage Guide:\n\n"
-        "1. Send any query to receive a thorough, comprehensive explanation.\n"
-        "2. Send an image to receive a detailed breakdown of its contents.\n"
-        "3. Send a PDF document to receive an in-depth analytical summary.\n\n"
+        "1. Send any query to receive a thorough explanation.\n"
+        "2. Ask follow-up questions naturally (e.g. 'Can you explain the second point further?').\n"
+        "3. Send an image or PDF for detailed analysis.\n"
+        "4. Use /new whenever you want to reset the conversation and start a completely new subject.\n\n"
         "Commands:\n"
-        "/start - Initialize bot\n"
+        "/new - Reset conversation memory\n"
+        "/start - Restart the bot\n"
         "/help - Instructions"
     )
     await update.message.reply_text(help_text, parse_mode=None)
@@ -194,9 +239,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     try:
-        reply_content = await generate_gemini_response(user_text)
+        parts = [types.Part.from_text(text=user_text)]
+        reply_content = await generate_gemini_response(chat_id, parts)
         await send_clean_message(update, reply_content)
-        print(f"📤 [Replied in detail to {user_name}]")
+        print(f"📤 [Replied with context to {user_name}]")
     except Exception as e:
         print(f"❌ [Error]: {e}")
         await update.message.reply_text(f"Error: {e}", parse_mode=None)
@@ -230,7 +276,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data=image_bytes,
             mime_type="image/jpeg",
         )
-        reply_content = await generate_gemini_response([image_part, caption])
+        parts = [image_part, types.Part.from_text(text=caption)]
+        reply_content = await generate_gemini_response(chat_id, parts)
         await send_clean_message(update, reply_content)
         print(f"📤 [Replied to photo from {user_name}]")
     except Exception as e:
@@ -272,7 +319,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await file.download_to_drive(custom_path=temp_path)
         uploaded_file = await ai_client.aio.files.upload(file=temp_path)
 
-        reply_content = await generate_gemini_response([uploaded_file, caption])
+        parts = [uploaded_file, types.Part.from_text(text=caption)]
+        reply_content = await generate_gemini_response(chat_id, parts)
         await send_clean_message(update, reply_content)
         print(f"📤 [Replied to document from {user_name}]")
     except Exception as e:
@@ -300,12 +348,12 @@ async def post_init(application):
     """Executed automatically once the bot connects to Telegram."""
     me = await application.bot.get_me()
     print("\n" + "=" * 55)
-    print("HIGH-IQ AI BOT IS ONLINE!")
+    print("HIGH-IQ AI BOT WITH CONTEXTUAL MEMORY IS ONLINE!")
     print(f"Bot Name:     {me.first_name}")
     print(f"Username:     @{me.username}")
     print(f"Direct Link:   https://t.me/{me.username}")
     print("=" * 55)
-    print("Ready for complex inquiries...\n")
+    print("Ready for ongoing discussions & follow-ups...\n")
 
 
 def main():
@@ -321,6 +369,7 @@ def main():
 
     app.add_handler(TypeHandler(Update, log_incoming_update), group=-1)
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("new", new_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
