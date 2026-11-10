@@ -43,7 +43,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"AI Telegram Bot is active!")
+        self.wfile.write(b"High-IQ AI Telegram Bot is active!")
 
     def log_message(self, format, *args):
         pass
@@ -58,35 +58,42 @@ def start_cloud_health_server():
 # 4. Initialize Gemini AI Client
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Ultra-compact, token-efficient system instruction
-CLEAN_SYSTEM_INSTRUCTION = (
-    "You are a friendly, fast, and smart AI assistant.\n"
-    "Rules:\n"
-    "1. NO SYMBOLS: Never use #, *, **, $, _, ~, `, or {}. Write in clean plain text only.\n"
-    "2. TOKEN SAVER: Be extremely brief, direct, and compact. 2 to 4 sentences or clean lines. No filler.\n"
-    "3. ACCURACY: Give up-to-date and accurate facts on any topic."
+# High-IQ, comprehensive, clean plain-text instruction
+HIGH_IQ_SYSTEM_INSTRUCTION = (
+    "You are an exceptionally intelligent, articulate, and deeply knowledgeable AI mind.\n"
+    "Your objective is to provide comprehensive, thorough, and crystal-clear explanations with high intellectual depth.\n\n"
+    "CORE PRINCIPLES:\n"
+    "1. THOROUGH & WELL-DEFINED: Never give short or dismissive answers. Fully define the subject, break down how it works, "
+    "explain background context, nuances, and real-world applications. Ensure the user walks away with complete mastery of the topic.\n"
+    "2. NO MEMORY / NO FOLLOW-UPS: Treat every prompt as an independent, standalone request. Never assume or refer to old conversations. "
+    "Crucially: NEVER add conversational follow-up questions at the end (e.g., do NOT write 'Do you want more details?', 'Let me know if you need help', etc.). End cleanly once the explanation is complete.\n"
+    "3. CLEAN PLAIN TEXT (ZERO SYMBOLS): Telegram does not render markdown well. Never use symbols like #, ##, *, **, $, _, ~, `, or {}.\n"
+    "To organize your response cleanly, use neat line breaks and readable plain capital labels (such as OVERVIEW, CORE DEFINITION, HOW IT WORKS, KEY TAKEAWAYS), or standard numbers (1, 2, 3).\n"
+    "4. SCIENCE, FORMULAS & REACTIONS: When explaining reactions or formulas, write them out clearly in words first, followed by clean standard keyboard text without confusing code symbols.\n"
+    "5. IMAGES & PDFS: Provide deep, systematic, and well-structured analysis covering all key elements in detail."
 )
 
 APP_CONFIG = types.GenerateContentConfig(
-    system_instruction=CLEAN_SYSTEM_INSTRUCTION,
-    max_output_tokens=500,
-    temperature=0.5,
+    system_instruction=HIGH_IQ_SYSTEM_INSTRUCTION,
+    max_output_tokens=2048,  # Generous headroom for deep, thorough answers
+    temperature=0.6,
 )
 
+# Priority list of models (prioritizes 3.8-flash for peak reasoning and high IQ)
 MODELS_TO_TRY = [
-    "gemini-3.5-flash-lite",
     "gemini-3.8-flash",
+    "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
     "gemini-2.5-flash-lite",
 ]
 
 
 async def generate_gemini_response(contents):
-    """Generate content asynchronously with automatic fallback and minimal token usage."""
+    """Generate content asynchronously with automatic fallback and high intellectual depth."""
     last_error = None
     for model_name in MODELS_TO_TRY:
         try:
-            print(f"🤖 Processing with {model_name}...")
+            print(f"🧠 High-IQ reasoning with {model_name}...")
             response = await ai_client.aio.models.generate_content(
                 model=model_name,
                 contents=contents,
@@ -101,16 +108,17 @@ async def generate_gemini_response(contents):
 
     if last_error:
         raise last_error
-    return "I couldn't generate a response. Please try asking again."
+    return "Unable to generate a response at this moment."
 
 
 async def send_clean_message(update: Update, text: str):
-    """Deliver clean plain-text messages safely."""
+    """Deliver clean plain-text messages safely across Telegram character boundaries."""
     max_length = 4000
     if len(text) <= max_length:
         await update.message.reply_text(text, parse_mode=None)
         return
 
+    # Clean chunking for long, in-depth explanations
     chunks = []
     current_chunk = ""
     for paragraph in text.split("\n"):
@@ -149,13 +157,13 @@ async def log_incoming_update(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name if update.effective_user else "there"
     welcome_text = (
-        f"Hello {user_name}! I am your fast AI assistant.\n\n"
-        "What I can do for you:\n"
-        "- Compact, direct answers to any question\n"
-        "- Studies, general knowledge, and brainstorming\n"
-        "- Quick image and photo review\n"
-        "- PDF summaries\n\n"
-        "Send any message or file to get started!"
+        f"Hello {user_name}. I am your advanced AI assistant.\n\n"
+        "Capabilities:\n"
+        "- Comprehensive, deeply articulated answers across all domains\n"
+        "- Advanced scientific, mathematical, and conceptual explanations\n"
+        "- High-detail photo and diagram analysis\n"
+        "- Exhaustive PDF and document reviews\n\n"
+        "Send any inquiry, image, or document to begin."
     )
     await update.message.reply_text(welcome_text, parse_mode=None)
     print(f"📤 [Sent Welcome to {user_name}]")
@@ -163,12 +171,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
-        "How to use me:\n\n"
-        "1. Send any question to get a fast, compact answer.\n"
-        "2. Send any photo to analyze it.\n"
-        "3. Send any PDF to get a summary.\n\n"
+        "Usage Guide:\n\n"
+        "1. Send any query to receive a thorough, comprehensive explanation.\n"
+        "2. Send an image to receive a detailed breakdown of its contents.\n"
+        "3. Send a PDF document to receive an in-depth analytical summary.\n\n"
         "Commands:\n"
-        "/start - Restart the bot\n"
+        "/start - Initialize bot\n"
         "/help - Instructions"
     )
     await update.message.reply_text(help_text, parse_mode=None)
@@ -188,7 +196,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         reply_content = await generate_gemini_response(user_text)
         await send_clean_message(update, reply_content)
-        print(f"📤 [Replied to {user_name}]")
+        print(f"📤 [Replied in detail to {user_name}]")
     except Exception as e:
         print(f"❌ [Error]: {e}")
         await update.message.reply_text(f"Error: {e}", parse_mode=None)
@@ -200,7 +208,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = update.effective_chat.id
     photo = update.message.photo[-1]
-    caption = update.message.caption or "Analyze this image briefly in plain text without formatting symbols."
+    caption = update.message.caption or (
+        "Please provide a comprehensive, deeply analytical breakdown of this image in clean plain text. "
+        "Explain all concepts, objects, text, and implications thoroughly without using formatting symbols like # or *."
+    )
     user_name = update.effective_user.first_name if update.effective_user else "User"
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
@@ -208,7 +219,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     temp_path = None
     try:
         file = await context.bot.get_file(photo.file_id)
-        # Download directly to a temp file to keep memory footprint minimal
         with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tf:
             temp_path = tf.name
         await file.download_to_drive(custom_path=temp_path)
@@ -237,31 +247,29 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = update.effective_chat.id
     doc = update.message.document
-    caption = update.message.caption or "Summarize this document briefly in plain text without formatting symbols."
+    caption = update.message.caption or (
+        "Please provide an exhaustive, deeply structured analytical review of this document in clean plain text. "
+        "Define all critical concepts, explain background logic, highlight key takeaways, and ensure thorough depth "
+        "without using symbols like # or *."
+    )
     user_name = update.effective_user.first_name if update.effective_user else "User"
 
-    # Enforce safe size limit to prevent memory crashes on free cloud hosting
     if doc.file_size and doc.file_size > 15 * 1024 * 1024:
         await update.message.reply_text("This file is larger than 15MB. Please send a smaller PDF.", parse_mode=None)
         return
 
-    # Notify user that processing has begun
-    status_msg = await update.message.reply_text("Reading and analyzing your document... Please give me a moment.", parse_mode=None)
+    status_msg = await update.message.reply_text("Analyzing your document in depth... Please give me a moment.", parse_mode=None)
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     temp_path = None
     uploaded_file = None
     try:
         file = await context.bot.get_file(doc.file_id)
-
-        # Save to disk stream to preserve RAM on Render (prevents 512MB OOM crash)
         file_ext = os.path.splitext(doc.file_name or "")[1] or ".pdf"
         with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tf:
             temp_path = tf.name
 
         await file.download_to_drive(custom_path=temp_path)
-
-        # Upload using Gemini's native Files API for robust server-side processing
         uploaded_file = await ai_client.aio.files.upload(file=temp_path)
 
         reply_content = await generate_gemini_response([uploaded_file, caption])
@@ -271,19 +279,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"❌ [Error with document]: {e}")
         await update.message.reply_text(f"Error reviewing document: {e}", parse_mode=None)
     finally:
-        # Clean up temporary file from disk
         if temp_path and os.path.exists(temp_path):
             try:
                 os.remove(temp_path)
             except Exception:
                 pass
-        # Clean up file from Google Cloud temporary storage
         if uploaded_file and hasattr(uploaded_file, "name"):
             try:
                 await ai_client.aio.files.delete(name=uploaded_file.name)
             except Exception:
                 pass
-        # Remove the status message
         if status_msg:
             try:
                 await status_msg.delete()
@@ -295,12 +300,12 @@ async def post_init(application):
     """Executed automatically once the bot connects to Telegram."""
     me = await application.bot.get_me()
     print("\n" + "=" * 55)
-    print("AI ASSISTANT BOT IS ONLINE!")
+    print("HIGH-IQ AI BOT IS ONLINE!")
     print(f"Bot Name:     {me.first_name}")
     print(f"Username:     @{me.username}")
     print(f"Direct Link:   https://t.me/{me.username}")
     print("=" * 55)
-    print("Listening for messages...\n")
+    print("Ready for complex inquiries...\n")
 
 
 def main():
