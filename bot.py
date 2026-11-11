@@ -58,9 +58,17 @@ def start_cloud_health_server():
         server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         print(f"🌐 Cloud health check listening on port {port}")
+        return True
+    return False
 
-# 4. Initialize Gemini AI Client
-ai_client = genai.Client(api_key=GEMINI_API_KEY)
+# 4. Initialize Gemini AI Client with zero retry lag (attempts=1 for instant fallback)
+ai_client = genai.Client(
+    api_key=GEMINI_API_KEY,
+    http_options=types.HttpOptions(
+        retry_options=types.HttpRetryOptions(attempts=1),
+        timeout=25000,  # 25 second timeout
+    ),
+)
 
 # High-IQ instruction with Adaptive Length, Follow-Up Memory, and Clean Plain Text
 HIGH_IQ_SYSTEM_INSTRUCTION = (
@@ -82,10 +90,11 @@ APP_CONFIG = types.GenerateContentConfig(
     temperature=0.6,
 )
 
+# Fastest, most reliable models first (avoids 503 lags on overloaded preview models)
 MODELS_TO_TRY = [
-    "gemini-3.8-flash",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
+    "gemini-3.8-flash",
     "gemini-2.5-flash-lite",
 ]
 
@@ -101,7 +110,7 @@ usage_stats = {
     "photo_count": 0,
     "doc_count": 0,
     "total_tokens": 0,
-    "recent_logs": deque(maxlen=10),  # Keeps last 10 interactions in memory
+    "recent_logs": deque(maxlen=10),
 }
 
 
@@ -140,7 +149,7 @@ def get_history(chat_id: int) -> list[types.Content]:
 
 
 async def generate_gemini_response(chat_id: int, current_parts: list) -> str:
-    """Generate content using conversation history and track token consumption."""
+    """Generate content using conversation history with instant model failover."""
     history = list(get_history(chat_id))
     current_content = types.Content(role="user", parts=current_parts)
     full_contents = history + [current_content]
@@ -148,16 +157,17 @@ async def generate_gemini_response(chat_id: int, current_parts: list) -> str:
     last_error = None
     for model_name in MODELS_TO_TRY:
         try:
-            print(f"🧠 Processing with {model_name} (turn #{len(full_contents)})...")
+            start_t = time.time()
             response = await ai_client.aio.models.generate_content(
                 model=model_name,
                 contents=full_contents,
                 config=APP_CONFIG,
             )
             if response and response.text:
+                elapsed = time.time() - start_t
+                print(f"⚡ {model_name} responded in {elapsed:.2f}s")
                 reply_text = response.text
 
-                # Track actual tokens used if provided by API
                 if hasattr(response, "usage_metadata") and response.usage_metadata:
                     tokens = getattr(response.usage_metadata, "total_token_count", 0) or 0
                     usage_stats["total_tokens"] += tokens
@@ -166,7 +176,7 @@ async def generate_gemini_response(chat_id: int, current_parts: list) -> str:
                 add_to_history(chat_id, "model", [types.Part.from_text(text=reply_text)])
                 return reply_text
         except Exception as e:
-            print(f"⚠️ {model_name} issue: {e}. Trying fallback...")
+            print(f"⚠️ {model_name} failed ({e}), instant failover...")
             last_error = e
             continue
 
@@ -259,12 +269,10 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show usage history and analytics (restricted if ADMIN_USER_ID is configured)."""
     user_id = update.effective_user.id
 
-    # Check admin restriction if ADMIN_USER_ID is set
     if ADMIN_USER_ID and str(user_id) != str(ADMIN_USER_ID).strip():
         await update.message.reply_text("Access denied. This command is restricted to the bot owner.", parse_mode=None)
         return
 
-    # Calculate uptime
     elapsed = int(time.time() - BOT_START_TIME)
     days, rem = divmod(elapsed, 86400)
     hours, rem = divmod(rem, 3600)
@@ -431,7 +439,11 @@ async def post_init(application):
 
 
 def main():
-    start_cloud_health_server()
+    is_cloud = start_cloud_health_server()
+    if is_cloud:
+        # Briefly wait for old Render container to cleanly disconnect during deploys
+        print("⏳ Waiting 5s for smooth cloud deployment handoff...")
+        time.sleep(5)
 
     print("Connecting to Telegram...")
     app = (
@@ -450,7 +462,7 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
