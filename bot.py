@@ -1,8 +1,11 @@
 import os
 import io
+import time
 import tempfile
 import logging
 import threading
+from collections import deque
+from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
 from telegram import Update
@@ -23,6 +26,7 @@ load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+ADMIN_USER_ID = os.getenv("ADMIN_USER_ID")  # Optional: Set your Telegram ID to lock /stats
 
 if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "your_telegram_bot_token_here":
     raise ValueError("Missing TELEGRAM_BOT_TOKEN in .env file or environment variables!")
@@ -43,7 +47,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"High-IQ AI Telegram Bot with Memory is active!")
+        self.wfile.write(b"AI Telegram Bot is active!")
 
     def log_message(self, format, *args):
         pass
@@ -58,19 +62,18 @@ def start_cloud_health_server():
 # 4. Initialize Gemini AI Client
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# High-IQ instruction with contextual memory awareness
+# High-IQ instruction with Adaptive Length, Follow-Up Memory, and Clean Plain Text
 HIGH_IQ_SYSTEM_INSTRUCTION = (
-    "You are an exceptionally intelligent, articulate, and deeply knowledgeable AI mind.\n"
-    "Your objective is to provide comprehensive, thorough, and crystal-clear explanations with high intellectual depth.\n\n"
+    "You are an exceptionally intelligent, articulate, and helpful AI assistant.\n\n"
     "CORE PRINCIPLES:\n"
-    "1. CONTEXT & FOLLOW-UPS: You have memory of this ongoing conversation. When the user asks follow-up questions "
-    "(such as 'why?', 'tell me more', 'how does this connect?', 'give an example of that'), seamlessly use the previous context to deliver deep, relevant answers.\n"
-    "2. THOROUGH & WELL-DEFINED: Never give short or dismissive answers. Fully define the subject, break down how it works, "
-    "explain background context, nuances, and real-world applications. Ensure the user walks away with complete mastery of the topic.\n"
-    "3. CLEAN PLAIN TEXT (ZERO SYMBOLS): Telegram does not render markdown well. Never use symbols like #, ##, *, **, $, _, ~, `, or {}.\n"
-    "To organize your response cleanly, use neat line breaks and readable plain capital labels (such as OVERVIEW, CORE DEFINITION, HOW IT WORKS, KEY TAKEAWAYS), or standard numbers (1, 2, 3).\n"
-    "4. SCIENCE, FORMULAS & REACTIONS: When explaining reactions or formulas, write them out clearly in words first, followed by clean standard keyboard text without confusing code symbols.\n"
-    "5. IMAGES & PDFS: Provide deep, systematic, and well-structured analysis covering all key elements in detail."
+    "1. ADAPTIVE RESPONSE LENGTH (CRITICAL): Always match your answer length to the complexity of the question:\n"
+    "   - Casual chats or simple factual questions (e.g., 'Hi', 'Who invented the lightbulb?', '5+7'): Reply naturally in 1 to 2 crisp, direct sentences.\n"
+    "   - Standard questions or study doubts: Give a clear, medium-length explanation with key definitions and easy steps.\n"
+    "   - Deep, complex, or 'explain in detail' prompts, or PDF/image reviews: Provide a thorough, well-structured, comprehensive breakdown.\n"
+    "2. CONTEXT & FOLLOW-UPS: You remember this ongoing conversation. Naturally reference prior messages when the user asks follow-ups.\n"
+    "3. CLEAN PLAIN TEXT (ZERO SYMBOLS): Telegram does not render markdown well. NEVER use symbols like #, ##, *, **, $, _, ~, `, or {}.\n"
+    "   To organize longer answers, use neat line breaks, plain uppercase section labels (like OVERVIEW, DETAILS), or simple numbers (1, 2, 3).\n"
+    "4. SCIENCE & REACTIONS: Explain reactions simply in plain words first, then clean keyboard formulas without confusing code symbols."
 )
 
 APP_CONFIG = types.GenerateContentConfig(
@@ -86,21 +89,47 @@ MODELS_TO_TRY = [
     "gemini-2.5-flash-lite",
 ]
 
-# 5. Per-User Conversation Memory (Keeps last 10 messages for follow-ups)
-# Format: { chat_id: [ types.Content(role="user"|"model", parts=[...]) ] }
+# 5. Per-User Conversation Memory & Usage Analytics
 chat_histories: dict[int, list[types.Content]] = {}
 MAX_HISTORY_MESSAGES = 10
 
+BOT_START_TIME = time.time()
+usage_stats = {
+    "unique_users": set(),
+    "user_names": {},
+    "text_count": 0,
+    "photo_count": 0,
+    "doc_count": 0,
+    "total_tokens": 0,
+    "recent_logs": deque(maxlen=10),  # Keeps last 10 interactions in memory
+}
+
+
+def record_activity(user_id: int, user_name: str, action_type: str, summary: str):
+    """Record anonymized usage statistics and recent events."""
+    usage_stats["unique_users"].add(user_id)
+    usage_stats["user_names"][user_id] = user_name
+
+    if action_type == "text":
+        usage_stats["text_count"] += 1
+    elif action_type == "photo":
+        usage_stats["photo_count"] += 1
+    elif action_type == "doc":
+        usage_stats["doc_count"] += 1
+
+    timestamp = datetime.now().strftime("%H:%M")
+    short_summary = (summary[:30] + "...") if len(summary) > 30 else summary
+    usage_stats["recent_logs"].append(f"[{timestamp}] {user_name} ({action_type}): {short_summary}")
+
 
 def add_to_history(chat_id: int, role: str, parts: list):
-    """Store message turn in memory while keeping memory compact."""
+    """Store message turn in memory while keeping RAM compact."""
     if chat_id not in chat_histories:
         chat_histories[chat_id] = []
 
     content = types.Content(role=role, parts=parts)
     chat_histories[chat_id].append(content)
 
-    # Keep only the last MAX_HISTORY_MESSAGES turns
     if len(chat_histories[chat_id]) > MAX_HISTORY_MESSAGES:
         chat_histories[chat_id] = chat_histories[chat_id][-MAX_HISTORY_MESSAGES:]
 
@@ -111,8 +140,7 @@ def get_history(chat_id: int) -> list[types.Content]:
 
 
 async def generate_gemini_response(chat_id: int, current_parts: list) -> str:
-    """Generate content using conversation history for smart follow-ups."""
-    # Build complete conversation sequence including this turn
+    """Generate content using conversation history and track token consumption."""
     history = list(get_history(chat_id))
     current_content = types.Content(role="user", parts=current_parts)
     full_contents = history + [current_content]
@@ -120,7 +148,7 @@ async def generate_gemini_response(chat_id: int, current_parts: list) -> str:
     last_error = None
     for model_name in MODELS_TO_TRY:
         try:
-            print(f"🧠 High-IQ reasoning with {model_name} (turn #{len(full_contents)})...")
+            print(f"🧠 Processing with {model_name} (turn #{len(full_contents)})...")
             response = await ai_client.aio.models.generate_content(
                 model=model_name,
                 contents=full_contents,
@@ -128,7 +156,12 @@ async def generate_gemini_response(chat_id: int, current_parts: list) -> str:
             )
             if response and response.text:
                 reply_text = response.text
-                # Commit both the user prompt and the model response to memory
+
+                # Track actual tokens used if provided by API
+                if hasattr(response, "usage_metadata") and response.usage_metadata:
+                    tokens = getattr(response.usage_metadata, "total_token_count", 0) or 0
+                    usage_stats["total_tokens"] += tokens
+
                 add_to_history(chat_id, "user", current_parts)
                 add_to_history(chat_id, "model", [types.Part.from_text(text=reply_text)])
                 return reply_text
@@ -186,26 +219,25 @@ async def log_incoming_update(update: Update, context: ContextTypes.DEFAULT_TYPE
 # --- Command Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    chat_histories.pop(chat_id, None)  # Reset memory on fresh start
+    chat_histories.pop(chat_id, None)
     user_name = update.effective_user.first_name if update.effective_user else "there"
     welcome_text = (
-        f"Hello {user_name}. I am your advanced AI assistant with conversational memory.\n\n"
+        f"Hello {user_name}. I am your AI assistant.\n\n"
         "Capabilities:\n"
-        "- In-depth, comprehensive explanations with contextual follow-ups\n"
-        "- Deep scientific, mathematical, and analytical reasoning\n"
-        "- High-detail photo and diagram analysis\n"
-        "- Exhaustive PDF and document reviews\n\n"
+        "- Fast, adaptable answers tailored to your exact question\n"
+        "- Contextual follow-up discussions\n"
+        "- Photo and diagram analysis\n"
+        "- PDF and document summaries\n\n"
         "Commands:\n"
         "/new - Clear memory & start a fresh topic\n"
-        "/help - Instructions\n\n"
-        "Send any inquiry, image, or document to begin."
+        "/help - Instructions"
     )
     await update.message.reply_text(welcome_text, parse_mode=None)
     print(f"📤 [Sent Welcome to {user_name}]")
 
 
 async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Clear conversation history so the user can switch topics completely."""
+    """Clear conversation history so the user can switch topics."""
     chat_id = update.effective_chat.id
     chat_histories.pop(chat_id, None)
     await update.message.reply_text("Conversation memory cleared. Ready for a new topic.", parse_mode=None)
@@ -215,16 +247,54 @@ async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "Usage Guide:\n\n"
-        "1. Send any query to receive a thorough explanation.\n"
-        "2. Ask follow-up questions naturally (e.g. 'Can you explain the second point further?').\n"
-        "3. Send an image or PDF for detailed analysis.\n"
-        "4. Use /new whenever you want to reset the conversation and start a completely new subject.\n\n"
-        "Commands:\n"
-        "/new - Reset conversation memory\n"
-        "/start - Restart the bot\n"
-        "/help - Instructions"
+        "1. Ask short questions for quick answers, or ask for details for deep explanations.\n"
+        "2. Ask follow-up questions naturally in the same chat.\n"
+        "3. Send any image or PDF document for analysis.\n"
+        "4. Send /new whenever you want to clear memory and start fresh."
     )
     await update.message.reply_text(help_text, parse_mode=None)
+
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show usage history and analytics (restricted if ADMIN_USER_ID is configured)."""
+    user_id = update.effective_user.id
+
+    # Check admin restriction if ADMIN_USER_ID is set
+    if ADMIN_USER_ID and str(user_id) != str(ADMIN_USER_ID).strip():
+        await update.message.reply_text("Access denied. This command is restricted to the bot owner.", parse_mode=None)
+        return
+
+    # Calculate uptime
+    elapsed = int(time.time() - BOT_START_TIME)
+    days, rem = divmod(elapsed, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    uptime_str = f"{days}d {hours}h {minutes}m" if days else f"{hours}h {minutes}m"
+
+    total_requests = usage_stats["text_count"] + usage_stats["photo_count"] + usage_stats["doc_count"]
+    recent_list = "\n".join(usage_stats["recent_logs"]) if usage_stats["recent_logs"] else "No activity recorded yet."
+
+    stats_text = (
+        "BOT USAGE REPORT\n\n"
+        f"Uptime (since last restart): {uptime_str}\n"
+        f"Total Unique Users: {len(usage_stats['unique_users'])}\n"
+        f"Total Requests Processed: {total_requests}\n"
+        f"- Text Questions: {usage_stats['text_count']}\n"
+        f"- Photos Reviewed: {usage_stats['photo_count']}\n"
+        f"- PDFs / Docs Reviewed: {usage_stats['doc_count']}\n"
+        f"Total Gemini Tokens Used: {usage_stats['total_tokens']}\n\n"
+        "RECENT ACTIVITY:\n"
+        f"{recent_list}"
+    )
+
+    if not ADMIN_USER_ID:
+        stats_text += (
+            f"\n\nPRIVACY TIP:\n"
+            f"Your Telegram User ID is {user_id}.\n"
+            f"To lock /stats so only you can see it, add ADMIN_USER_ID={user_id} to your Render Environment Variables."
+        )
+
+    await update.message.reply_text(stats_text, parse_mode=None)
 
 
 # --- Message Handlers ---
@@ -234,15 +304,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_text = update.message.text
     chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
     user_name = update.effective_user.first_name if update.effective_user else "User"
 
+    record_activity(user_id, user_name, "text", user_text)
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     try:
         parts = [types.Part.from_text(text=user_text)]
         reply_content = await generate_gemini_response(chat_id, parts)
         await send_clean_message(update, reply_content)
-        print(f"📤 [Replied with context to {user_name}]")
+        print(f"📤 [Replied to {user_name}]")
     except Exception as e:
         print(f"❌ [Error]: {e}")
         await update.message.reply_text(f"Error: {e}", parse_mode=None)
@@ -253,13 +325,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
     photo = update.message.photo[-1]
     caption = update.message.caption or (
-        "Please provide a comprehensive, deeply analytical breakdown of this image in clean plain text. "
-        "Explain all concepts, objects, text, and implications thoroughly without using formatting symbols like # or *."
+        "Analyze this image clearly in clean plain text. Adapt your depth to the image complexity "
+        "without using formatting symbols like # or *."
     )
     user_name = update.effective_user.first_name if update.effective_user else "User"
 
+    record_activity(user_id, user_name, "photo", update.message.caption or "Image uploaded")
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     temp_path = None
@@ -293,11 +367,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
     doc = update.message.document
     caption = update.message.caption or (
-        "Please provide an exhaustive, deeply structured analytical review of this document in clean plain text. "
-        "Define all critical concepts, explain background logic, highlight key takeaways, and ensure thorough depth "
-        "without using symbols like # or *."
+        "Analyze and summarize this document thoroughly in clean plain text without using symbols like # or *."
     )
     user_name = update.effective_user.first_name if update.effective_user else "User"
 
@@ -305,7 +378,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("This file is larger than 15MB. Please send a smaller PDF.", parse_mode=None)
         return
 
-    status_msg = await update.message.reply_text("Analyzing your document in depth... Please give me a moment.", parse_mode=None)
+    record_activity(user_id, user_name, "doc", doc.file_name or "PDF document")
+    status_msg = await update.message.reply_text("Analyzing your document... Please give me a moment.", parse_mode=None)
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     temp_path = None
@@ -348,12 +422,12 @@ async def post_init(application):
     """Executed automatically once the bot connects to Telegram."""
     me = await application.bot.get_me()
     print("\n" + "=" * 55)
-    print("HIGH-IQ AI BOT WITH CONTEXTUAL MEMORY IS ONLINE!")
+    print("AI ASSISTANT BOT IS ONLINE!")
     print(f"Bot Name:     {me.first_name}")
     print(f"Username:     @{me.username}")
     print(f"Direct Link:   https://t.me/{me.username}")
     print("=" * 55)
-    print("Ready for ongoing discussions & follow-ups...\n")
+    print("Listening for messages...\n")
 
 
 def main():
@@ -371,6 +445,7 @@ def main():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("new", new_command))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
